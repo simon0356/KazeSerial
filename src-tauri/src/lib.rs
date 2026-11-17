@@ -1195,6 +1195,16 @@ async fn clear_logs(state: tauri::State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes the lines above the line `before_id` from the log store when the user removes them
+/// from the main log, so MCP clients see the same log. Like [`clear_logs`], it emits nothing: the
+/// window already removed them.
+#[tauri::command]
+async fn clear_logs_before(before_id: u64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _publishing = state.publish_lock.lock().await;
+    state.log_store.remove_before(before_id).await;
+    Ok(())
+}
+
 /// Opens a file once: its lines replace the logs. Decoded and split like a followed file,
 /// except that the last line is kept even without a trailing newline.
 #[tauri::command]
@@ -1388,6 +1398,53 @@ fn create_config_dir(app: &mut tauri::App) {
         }
     };
 }
+
+/// Under Wayland, tao draws the title bar as a GTK header bar inside a `.titlebar` event
+/// box, which themes such as Yaru make 46px tall. Shrink its padding and buttons, above
+/// the theme's priority, and stop it reserving room for a subtitle it never shows.
+#[cfg(target_os = "linux")]
+fn compact_title_bar<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    use gtk::prelude::*;
+
+    let header = window
+        .gtk_window()
+        .ok()
+        .and_then(|gtk_window| gtk_window.titlebar())
+        .and_then(|titlebar| titlebar.downcast::<gtk::Bin>().ok())
+        .and_then(|event_box| event_box.child())
+        .and_then(|child| child.downcast::<gtk::HeaderBar>().ok());
+    if let Some(header) = header {
+        header.set_has_subtitle(false);
+    }
+
+    const CSS: &[u8] = b"
+        .titlebar > headerbar {
+            min-height: 0;
+            padding: 1px 4px;
+        }
+        .titlebar > headerbar button.titlebutton,
+        .titlebar > headerbar separator.titlebutton {
+            min-height: 20px;
+            min-width: 20px;
+            margin-top: 0;
+            margin-bottom: 0;
+            padding: 0;
+        }
+    ";
+    let provider = gtk::CssProvider::new();
+    if let Err(err) = provider.load_from_data(CSS) {
+        println!("Unable to load title bar style: {}", err);
+        return;
+    }
+    if let Some(screen) = gtk::gdk::Screen::default() {
+        gtk::StyleContext::add_provider_for_screen(
+            &screen,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 /// Default MCP port. Picked to be memorable and outside the ephemeral range;
 /// the UI can request another one, and 0 asks the OS for any free port.
 const DEFAULT_MCP_PORT: u16 = 9339;
@@ -1401,6 +1458,10 @@ pub fn run() {
     builder
         .setup(|app| {
             create_config_dir(app);
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                compact_title_bar(&window);
+            }
 
             // Default log file folder: in the user data folder, named after the application
             // rather than its identifier
@@ -1439,6 +1500,7 @@ pub fn run() {
             append_logs_line,
             refresh_logs,
             clear_logs,
+            clear_logs_before,
             add_marker,
             insert_marker,
             set_log_file_settings,
